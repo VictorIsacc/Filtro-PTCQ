@@ -1,0 +1,38 @@
+{
+  "name": "PTCQ 6/49",
+  "short_name": "PTCQ",
+  "description": "PTCQ 6/49 · Desarrollo por firma digital, análisis histórico, pronósticos y escrutinio.",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": [
+    "window-controls-overlay",
+    "standalone",
+    "minimal-ui"
+  ],
+  "background_color": "#08111f",
+  "theme_color": "#08111f",
+  "orientation": "any",
+  "lang": "es-ES",
+  "icons": [
+    {
+      "src": "./icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "./icons/icon-maskable-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
