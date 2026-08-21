@@ -1,9 +1,9 @@
 {
   "name": "PTCQ 6/49",
   "short_name": "PTCQ 6/49",
-  "description": "PTCQ 6/49 · Desarrollo por firma digital, análisis histórico, pronósticos y escrutinio.",
+  "description": "PTCQ 6/49 · Desarrollo por firma digital, Calibrado 56, análisis histórico y escrutinio.",
   "id": "./ptcq-6x49-app",
-  "start_url": "./",
+  "start_url": "./index.html",
   "scope": "./",
   "display": "standalone",
   "display_override": [
@@ -15,6 +15,8 @@
   "theme_color": "#08111f",
   "orientation": "any",
   "lang": "es-ES",
+  "categories": ["utilities"],
+  "prefer_related_applications": false,
   "icons": [
     {
       "src": "./icon-192.png",
