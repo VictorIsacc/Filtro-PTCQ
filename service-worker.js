@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'v4-20260821';
+const CACHE_VERSION = 'v5-20260822';
 const CACHE_PREFIX = 'ptcq-6x49-pwa-';
 const CACHE_NAME = `${CACHE_PREFIX}${CACHE_VERSION}`;
 const RUNTIME_CACHE = `${CACHE_PREFIX}runtime-${CACHE_VERSION}`;
@@ -53,15 +53,21 @@ self.addEventListener('fetch', event => {
   if (request.method !== 'GET') return;
 
   if (request.mode === 'navigate') {
+    const cachePromise = caches.open(CACHE_NAME);
+    const networkUpdate = cachePromise.then(async cache => {
+      const response = await fetch(request);
+      if (response.ok) await cache.put('./index.html', response.clone());
+      return response;
+    });
+
+    // La aplicación instalada abre inmediatamente el index precargado. La
+    // copia de red se actualiza en segundo plano para el siguiente arranque.
+    event.waitUntil(networkUpdate.then(() => undefined).catch(() => undefined));
     event.respondWith((async () => {
-      const cache = await caches.open(CACHE_NAME);
-      try {
-        const response = await fetch(request);
-        if (response.ok) await cache.put('./index.html', response.clone());
-        return response;
-      } catch (_) {
-        return (await cache.match('./index.html')) || (await cache.match('./'));
-      }
+      const cache = await cachePromise;
+      const cached = (await cache.match('./index.html')) || (await cache.match('./'));
+      if (cached) return cached;
+      return networkUpdate;
     })());
     return;
   }
