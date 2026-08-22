@@ -683,18 +683,43 @@
   function classifiedExportWorkerSource(){return `
   const EQUIVALENCES=[1,7,28,84,210],TOTAL=13983816;
   const digitsFromKey=key=>{const d=Array(6);let x=key;for(let p=5;p>=0;p--){d[p]=(x%9)+1;x=Math.floor(x/9)}return d};
+  const vdcFromKey=key=>{let sum=0;for(let p=0;p<6;p++){sum+=(key%9)+1;key=Math.floor(key/9)}return sum%9||9};
   const bucketKey=(vdc,eq)=>vdc+'_'+eq;
+  const aggregateKey=eq=>'TODAS_VDC_'+eq;
 
-  async function openWriters(directory,rootName,mode,equivalences){
+  function plannedFileCounts(keys,eqs,mode,equivalences){
+    const counts={};
+    for(const eq of equivalences){
+      counts[aggregateKey(eq)]=0;
+      for(let vdc=1;vdc<=9;vdc++)counts[bucketKey(vdc,eq)]=0;
+    }
+    for(let i=0;i<keys.length;i++){
+      const eq=eqs[i];if(!equivalences.includes(eq))continue;
+      const amount=mode==='natural'?eq:1;
+      counts[bucketKey(vdcFromKey(keys[i]),eq)]+=amount;
+      counts[aggregateKey(eq)]+=amount;
+    }
+    return counts;
+  }
+
+  async function openWriters(directory,rootName,mode,equivalences,plannedCounts){
     const root=await directory.getDirectoryHandle(rootName,{create:true}),writers={};
     for(let vdc=1;vdc<=9;vdc++){
       const folder=await root.getDirectoryHandle('VDC_'+vdc,{create:true});
       for(const eq of equivalences){
         const eqFolder=await folder.getDirectoryHandle('Equivalencia_'+eq,{create:true});
         const prefix=mode==='natural'?'Naturales':'Digitales';
-        const file=await eqFolder.getFileHandle(prefix+'.txt',{create:true});
+        const count=plannedCounts[bucketKey(vdc,eq)]||0;
+        const file=await eqFolder.getFileHandle(prefix+'_'+count+'_combinaciones.txt',{create:true});
         writers[bucketKey(vdc,eq)]=await file.createWritable({keepExistingData:false});
       }
+    }
+    for(const eq of equivalences){
+      const folder=await root.getDirectoryHandle('Equivalencia_'+eq+'_TODAS_VDC',{create:true});
+      const prefix=mode==='natural'?'Naturales':'Digitales';
+      const count=plannedCounts[aggregateKey(eq)]||0;
+      const file=await folder.getFileHandle(prefix+'_'+count+'_combinaciones.txt',{create:true});
+      writers[aggregateKey(eq)]=await file.createWritable({keepExistingData:false});
     }
     return writers;
   }
@@ -704,14 +729,16 @@
     const equivalences=data.eqFilter==='all'?EQUIVALENCES:[Number(data.eqFilter)];
     let writers=null;
     try{
-      writers=await openWriters(data.directory,data.rootName,mode,equivalences);
+      const plannedCounts=plannedFileCounts(data.digitalKeys,data.digitalEquivalences,mode,equivalences);
+      writers=await openWriters(data.directory,data.rootName,mode,equivalences,plannedCounts);
       const buffers={},sizes={},counts={};
-      for(let vdc=1;vdc<=9;vdc++)for(const eq of equivalences){const k=bucketKey(vdc,eq);buffers[k]=[];sizes[k]=0;counts[k]=0}
+      for(const key of Object.keys(writers)){buffers[key]=[];sizes[key]=0;counts[key]=0}
       const flush=async key=>{
         if(!sizes[key])return;
         await writers[key].write(buffers[key].join(''));
         buffers[key]=[];sizes[key]=0;
       };
+      const append=async(key,line)=>{buffers[key].push(line);sizes[key]+=line.length;counts[key]++;if(sizes[key]>=524288)await flush(key)};
       let processed=0,exported=0;
 
       if(mode==='digital'){
@@ -721,8 +748,7 @@
           const eq=eqs[i];if(!equivalences.includes(eq))continue;
           const digits=digitsFromKey(keys[i]),sum=digits.reduce((a,b)=>a+b,0),vdc=sum%9||9,key=bucketKey(vdc,eq);
           const line=digits.join(' ')+' | suma digital '+sum+' | VDC '+vdc+' | equivalencia '+eq+'\\n';
-          buffers[key].push(line);sizes[key]+=line.length;counts[key]++;exported++;
-          if(sizes[key]>=524288)await flush(key);
+          await append(key,line);await append(aggregateKey(eq),line);exported++;
           if((processed%50000)===0)postMessage({kind:'progress',mode,processed,total:keys.length,exported});
         }
       }else{
@@ -747,8 +773,7 @@
           let ok=true;for(const def of defs)if(!pass(d,def)){ok=false;break}if(!ok)continue;
           const sum=d.reduce((x,y)=>x+y,0),vdc=sum%9||9,key=bucketKey(vdc,eq);
           const line=String(a).padStart(2,'0')+' '+String(b).padStart(2,'0')+' '+String(c).padStart(2,'0')+' '+String(d4).padStart(2,'0')+' '+String(e5).padStart(2,'0')+' '+String(f).padStart(2,'0')+'\\n';
-          buffers[key].push(line);sizes[key]+=line.length;counts[key]++;exported++;
-          if(sizes[key]>=524288)await flush(key);
+          await append(key,line);await append(aggregateKey(eq),line);exported++;
           if((processed%900000)===0)postMessage({kind:'progress',mode,processed,total:TOTAL,exported});
         }
       }
@@ -780,7 +805,7 @@
     const progress=document.getElementById('progress'),progressText=document.getElementById('progressText');
     const naturalBtn=document.getElementById('exportResults'),digitalBtn=document.getElementById('exportDigital');
     progress.classList.add('show');naturalBtn.disabled=true;digitalBtn.disabled=true;
-    progressText.textContent=`Preparando exportación ${kind.toLowerCase()} por VDC 1–9 y equivalencia ${eqFilter==='all'?'1/7/28/84/210':eqFilter}…`;
+    progressText.textContent=`Preparando exportación ${kind.toLowerCase()} por VDC 1–9 y recopilados globales de equivalencia ${eqFilter==='all'?'1/7/28/84/210':eqFilter}…`;
 
     const wb=new Blob([classifiedExportWorkerSource()],{type:'application/javascript'}),url=URL.createObjectURL(wb);
     exportWorker=new Worker(url);URL.revokeObjectURL(url);
@@ -795,7 +820,8 @@
       }
       if(m.kind==='done'){
         finish();
-        document.getElementById('resultNote').textContent=`Exportación terminada: ${fmt(m.exported)} ${kind.toLowerCase()} guardadas en «${m.rootName}», con 9 carpetas VDC y subcarpetas separadas por equivalencia.`;
+        const globalFolders=eqFilter==='all'?5:1;
+        document.getElementById('resultNote').textContent=`Exportación terminada: ${fmt(m.exported)} ${kind.toLowerCase()} guardadas en «${m.rootName}», con 9 carpetas VDC y ${globalFolders} recopilado${globalFolders===1?'':'s'} global${globalFolders===1?'':'es'} por equivalencia.`;
       }
     };
     exportWorker.onerror=e=>{finish();alert('Error durante la exportación clasificada: '+e.message)};
