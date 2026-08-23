@@ -131,6 +131,7 @@
 
   .reasonchip.struct56{border-color:#b3742f;color:#ffe5bd;background:#4b2f17}
   .reasonchip.calibrated{border-color:#398a78;color:#d8fff5;background:#173f38}
+  .reasonchip.recent23{border-color:#4f72c5;color:#e1ebff;background:#1d2d5e}
   .struct56summary{margin:8px 0 0;padding:9px 11px;border:1px solid #5b4728;border-radius:10px;background:#211a12;color:#f1d7ad;font-size:11px;line-height:1.45}
 
   .struct56summary.checking{border-color:#356483;background:#102738;color:#cfeeff}
@@ -383,6 +384,7 @@
             <button class="mode" data-mode="broad">Amplio</button>
             <button class="mode" data-mode="temporal">Temporal</button>
             <button class="mode" data-mode="adaptive">Adaptativo</button>
+            <button class="mode" data-mode="recent23">Recientes 2–3</button>
             <button class="mode" data-mode="calibrated">Calibrado 56</button>
             <button class="mode" data-mode="struct56">Estructural 56</button>
             <select id="discardFamily" style="background:#0c1728;color:#eaf2ff;border:1px solid #334b6c;border-radius:9px;padding:8px">
@@ -846,7 +848,7 @@
 
 
   // ===== ANÁLISIS HISTÓRICO PTCQ =====
-  let historyRaw=[], historyWorkbook=null, historySourceName='', historyCurrentSheet='', historyWindowData=[], historySigs=[], historyAnalysis=null, historySheetCounts={}, discardMode='prudent', discardState={}, discardProposalMeta={}, calibratedForecast=null, calibratedBacktest=null, struct56Validation=null, struct56RepairWorker=null, struct56ValidateTimer=null, struct56Method='sequential', struct56StartedAt=0;
+  let historyRaw=[], historyWorkbook=null, historySourceName='', historyCurrentSheet='', historyWindowData=[], historySigs=[], historyAnalysis=null, historySheetCounts={}, discardMode='prudent', discardState={}, discardProposalMeta={}, recent23Forecast=null, recent23Backtest=null, calibratedForecast=null, calibratedBacktest=null, struct56Validation=null, struct56RepairWorker=null, struct56ValidateTimer=null, struct56Method='sequential', struct56StartedAt=0;
   all.forEach(id=>discardState[id]=new Set());
 
   const familyNames={positions:'Posiciones + VDC',pairs:'Parejas',trios:'Tríos',quartets:'Cuartetos',quintets:'Quintetos'};
@@ -1395,6 +1397,204 @@ El valor del último sorteo de cada columna se usa como candidato especial cuand
   }
 
 
+  // ===== PRONÓSTICO RECIENTES 2–3 =====
+  // Cada columna parte de U1, U2 y U3. Los valores recientes con riesgo
+  // elevado de aparecer en el siguiente sorteo se sustituyen por alternativas
+  // de la misma columna. La salida contiene siempre 2 o 3 descartes distintos.
+  const RECENT23_WARMUP=36;
+
+  function recent23Pattern(series,endIndex){
+    if(endIndex<3)return 'SIN3';
+    const a=series[endIndex-3],b=series[endIndex-2],c=series[endIndex-1];
+    if(a===b&&b===c)return 'AAA';
+    if(a===c)return 'ABA';
+    if(a===b)return 'AAB';
+    if(b===c)return 'ABB';
+    return 'ABC';
+  }
+
+  function recent23FamilyOfId(id){
+    if(groups.pairs.includes(id))return 'pairs';
+    if(groups.trios.includes(id))return 'trios';
+    if(groups.quartets.includes(id))return 'quartets';
+    return 'quintets';
+  }
+
+  function recent23ColumnForecast(id,sigs=historySigs,endIndex=sigs.length){
+    const series=sigs.map(s=>s[id]);
+    const n=Math.max(0,Math.min(endIndex,series.length)),randomRate=1/9;
+    const marginal=Array(10).fill(0),recent=Array(10).fill(0);
+    const transition1=Array.from({length:10},()=>Array(10).fill(0));
+    const transition2=Array.from({length:10},()=>Array(10).fill(0));
+    const transition1N=Array(10).fill(0),transition2N=Array(10).fill(0);
+    const patternCounts={},patternN={};
+
+    for(let i=0;i<n;i++){
+      const value=series[i];marginal[value]++;
+      if(i>=1){transition1[series[i-1]][value]++;transition1N[series[i-1]]++}
+      if(i>=2){transition2[series[i-2]][value]++;transition2N[series[i-2]]++}
+      if(i>=3){
+        const p=recent23Pattern(series,i);
+        if(!patternCounts[p])patternCounts[p]=Array(10).fill(0);
+        patternCounts[p][value]++;patternN[p]=(patternN[p]||0)+1;
+      }
+    }
+    const recentStart=Math.max(0,n-9);
+    for(let i=recentStart;i<n;i++)recent[series[i]]++;
+    const recentN=n-recentStart,last=series[n-1],lag2=series[n-2],pattern=recent23Pattern(series,n);
+    const risks=Array(10).fill(randomRate);
+    for(let v=1;v<=9;v++){
+      const pMarginal=(marginal[v]+2)/(n+18);
+      const pRecent=(recent[v]+6*pMarginal)/(recentN+6);
+      const pT1=last==null?pMarginal:(transition1[last][v]+12*pMarginal)/(transition1N[last]+12);
+      const pT2=lag2==null?pMarginal:(transition2[lag2][v]+18*pMarginal)/(transition2N[lag2]+18);
+      const pn=patternN[pattern]||0,pc=patternCounts[pattern]?.[v]||0;
+      const pPattern=(pc+18*pT1)/(pn+18);
+      risks[v]=clamp01(.30*pT1+.18*pT2+.18*pRecent+.14*pMarginal+.20*pPattern);
+    }
+
+    const recentByValue=new Map();
+    for(let lag=1;lag<=3;lag++){
+      const value=series[n-lag];
+      if(value==null)continue;
+      if(!recentByValue.has(value))recentByValue.set(value,[]);
+      recentByValue.get(value).push(lag);
+    }
+    const initial=[...recentByValue].map(([value,lags])=>({value,lags,risk:risks[value]}));
+    const outside=[];
+    for(let value=1;value<=9;value++)if(!recentByValue.has(value))outside.push({value,risk:risks[value]});
+    outside.sort((a,b)=>a.risk-b.risk||a.value-b.value);
+    const bestOutsideRisk=outside[0]?.risk??randomRate;
+    const rejected=[],selected=[];
+
+    for(const item of initial){
+      const unsafe=item.risk>=.145&&item.risk>bestOutsideRisk+.028;
+      if(unsafe)rejected.push(item);
+      else selected.push({
+        ...item,origin:'recent',replaces:null,
+        reasons:[
+          {k:'recent23',t:item.lags.map(x=>'U'+x).join('/')},
+          {k:'recent23',t:`riesgo ${(item.risk*100).toFixed(1)}%`},
+          ...(item.lags.includes(1)?[{k:'recent23',t:`patrón ${pattern}`}]:[])
+        ]
+      });
+    }
+
+    const used=new Set(selected.map(x=>x.value));
+    const replacedRecent=new Set();
+    const takeAlternative=()=>outside.find(x=>!used.has(x.value));
+    rejected.sort((a,b)=>b.risk-a.risk);
+    for(const removed of rejected){
+      if(selected.length>=3)break;
+      const alt=takeAlternative();
+      if(!alt)break;
+      if(selected.length<2||alt.risk+.012<removed.risk){
+        used.add(alt.value);
+        replacedRecent.add(removed.value);
+        selected.push({
+          ...alt,lags:[],origin:'replacement',replaces:removed.value,
+          reasons:[
+            {k:'recent23',t:`sustituye ${removed.value}`},
+            {k:'recent23',t:`riesgo ${(alt.risk*100).toFixed(1)}%`},
+            {k:'recent23',t:'modelo columna'}
+          ]
+        });
+      }
+    }
+
+    while(selected.length<2){
+      const alt=takeAlternative();
+      if(!alt)break;
+      used.add(alt.value);
+      selected.push({
+        ...alt,lags:[],origin:'replacement',replaces:null,
+        reasons:[
+          {k:'recent23',t:'completa mínimo 2'},
+          {k:'recent23',t:`riesgo ${(alt.risk*100).toFixed(1)}%`},
+          {k:'recent23',t:'modelo columna'}
+        ]
+      });
+    }
+
+    if(selected.length<3){
+      const alt=takeAlternative();
+      const worstRejected=rejected.find(x=>!replacedRecent.has(x.value));
+      const replacesUnsafe=worstRejected&&alt&&alt.risk+.012<worstRejected.risk;
+      // Cuando U1/U2/U3 solo aportan uno o dos valores distintos, el tercero
+      // se añade únicamente si muestra una seguridad especialmente alta.
+      const thirdReliable=alt&&alt.risk<=.085;
+      if(alt&&(replacesUnsafe||thirdReliable)){
+        used.add(alt.value);
+        selected.push({
+          ...alt,lags:[],origin:'replacement',replaces:replacesUnsafe?worstRejected.value:null,
+          reasons:[
+            {k:'recent23',t:replacesUnsafe?`sustituye ${worstRejected.value}`:'3º validado'},
+            {k:'recent23',t:`riesgo ${(alt.risk*100).toFixed(1)}%`},
+            {k:'recent23',t:'modelo columna'}
+          ]
+        });
+      }
+    }
+
+    selected.sort((a,b)=>a.risk-b.risk||a.value-b.value);
+    return {
+      id,pattern,recent:[series[n-1],series[n-2],series[n-3]],initial,selected,
+      rejected,replacements:selected.filter(x=>x.origin==='replacement').length,
+      expectedRisk:selected.reduce((sum,x)=>sum+x.risk,0),risks
+    };
+  }
+
+  function buildRecent23Forecast(sigs=historySigs,endIndex=sigs.length){
+    const ids=[...groups.pairs,...groups.trios,...groups.quartets,...groups.quintets];
+    const byId={},families={pairs:{columns:0,values:0,replacements:0},trios:{columns:0,values:0,replacements:0},quartets:{columns:0,values:0,replacements:0},quintets:{columns:0,values:0,replacements:0}};
+    let two=0,three=0,total=0,replacements=0,currentRisk=0;
+    for(const id of ids){
+      const result=recent23ColumnForecast(id,sigs,endIndex);byId[id]=result;
+      const count=result.selected.length;
+      if(count===2)two++;if(count===3)three++;
+      total+=count;replacements+=result.replacements;currentRisk+=result.expectedRisk;
+      const fam=families[recent23FamilyOfId(id)];
+      fam.columns++;fam.values+=count;fam.replacements+=result.replacements;
+    }
+    return {byId,two,three,total,replacements,currentRisk,families,columns:ids.length};
+  }
+
+  function backtestRecent23Forecast(sigs=historySigs){
+    const ids=[...groups.pairs,...groups.trios,...groups.quartets,...groups.quintets];
+    const firstTarget=Math.min(RECENT23_WARMUP,sigs.length),rows=[];
+    const familyTotals={pairs:{selections:0,errors:0},trios:{selections:0,errors:0},quartets:{selections:0,errors:0},quintets:{selections:0,errors:0}};
+    for(let target=firstTarget;target<sigs.length;target++){
+      const row={target,selections:0,errors:0,replacements:0,two:0,three:0};
+      for(const id of ids){
+        const result=recent23ColumnForecast(id,sigs,target),fam=recent23FamilyOfId(id);
+        const values=result.selected.map(x=>x.value),count=values.length;
+        row.selections+=count;row.replacements+=result.replacements;
+        if(count===2)row.two++;if(count===3)row.three++;
+        familyTotals[fam].selections+=count;
+        if(values.includes(sigs[target][id])){row.errors++;familyTotals[fam].errors++}
+      }
+      rows.push(row);
+    }
+    const selections=rows.reduce((sum,x)=>sum+x.selections,0);
+    const errors=rows.reduce((sum,x)=>sum+x.errors,0);
+    const middle=Math.floor(rows.length/2),halfRate=part=>{
+      const s=part.reduce((sum,x)=>sum+x.selections,0),e=part.reduce((sum,x)=>sum+x.errors,0);
+      return s?e/s:0;
+    };
+    const distribution={};rows.forEach(x=>distribution[x.errors]=(distribution[x.errors]||0)+1);
+    return {
+      rows,draws:rows.length,selections,errors,rate:selections?errors/selections:0,
+      randomRate:1/9,randomExpected:selections/9,
+      averageSelected:rows.length?selections/rows.length:0,
+      averageErrors:rows.length?errors/rows.length:0,
+      maxErrors:rows.length?Math.max(...rows.map(x=>x.errors)):0,
+      firstRate:halfRate(rows.slice(0,middle)),secondRate:halfRate(rows.slice(middle)),
+      distribution,familyTotals,firstTarget
+    };
+  }
+  // ===== FIN PRONÓSTICO RECIENTES 2–3 =====
+
+
 
   function struct56RepairWorkerSource(){return `
     const TOTAL_KEYS=531441;
@@ -1803,8 +2003,32 @@ El valor del último sorteo de cada columna se usa como candidato especial cuand
   function updateStruct56Summary(){
     const box=document.getElementById('struct56Summary');
     const tester=document.getElementById('calibratedTestBox');
-    if(tester)tester.style.display=discardMode==='calibrated'?'block':'none';
+    if(tester)tester.style.display=['calibrated','recent23'].includes(discardMode)?'block':'none';
     if(!box)return;
+    if(discardMode==='recent23'){
+      box.style.display='block';
+      if(!recent23Forecast){
+        box.className='struct56summary checking';
+        box.innerHTML='<b>Recientes 2–3 pendiente.</b><br>Analiza un histórico con al menos tres sorteos para validar U1, U2 y U3 en cada columna.';
+        return;
+      }
+      const F=recent23Forecast,B=recent23Backtest;
+      const famText=['pairs','trios','quartets','quintets'].map(f=>{
+        const x=F.families[f];return `${familyNames[f]}: ${x.values} descartes (${x.replacements} sustituciones)`;
+      }).join(' · ');
+      const backtestText=B?.draws
+        ? `<br><b>Backtest móvil:</b> ${B.draws} sorteos, ${fmt(B.selections)} descartes y ${fmt(B.errors)} fallos `+
+          `(${(B.rate*100).toFixed(2)}%; referencia aleatoria ${(B.randomRate*100).toFixed(2)}%). `+
+          `Media: ${B.averageErrors.toFixed(2)} fallos por sorteo; máximo: ${B.maxErrors}.`
+        : '<br><b>Backtest móvil:</b> el histórico necesita más sorteos posteriores para medir el criterio.';
+      box.className='struct56summary '+(B?.draws&&B.rate<=B.randomRate?'ok':'warn');
+      box.innerHTML=
+        `<b>Recientes 2–3 · U1/U2/U3 validados por columna</b><br>`+
+        `${F.two} columnas con 2 descartes y ${F.three} con 3: ${F.total} valores en 56 columnas. `+
+        `${F.replacements} valores recientes se han sustituido o completado con alternativas de menor riesgo.<br>`+
+        famText+backtestText;
+      return;
+    }
     if(discardMode==='calibrated'){
       box.style.display='block';
       if(!calibratedForecast){
@@ -1890,6 +2114,8 @@ El valor del último sorteo de cada columna se usa como candidato especial cuand
     if(!historyAnalysis)return;
     all.forEach(id=>discardState[id]=new Set());
     discardProposalMeta={};
+    recent23Forecast=null;
+    recent23Backtest=null;
     calibratedForecast=null;
     calibratedBacktest=null;
 
@@ -1956,6 +2182,33 @@ El valor del último sorteo de cada columna se usa como candidato especial cuand
         }
       }
       renderDiscardCards();
+    }
+
+    if(discardMode==='recent23'){
+      groups.positions.forEach(id=>{
+        discardState[id]=new Set();
+        discardProposalMeta[id]={};
+      });
+      if(historySigs.length<3){
+        renderDiscardCards();
+        return;
+      }
+      recent23Forecast=buildRecent23Forecast();
+      recent23Backtest=backtestRecent23Forecast();
+      resetCalibratedTestResult();
+      const ids56=[...groups.pairs,...groups.trios,...groups.quartets,...groups.quintets];
+      for(const id of ids56){
+        const result=recent23Forecast.byId[id];
+        discardProposalMeta[id]={};
+        for(const item of result.selected){
+          discardState[id].add(item.value);
+          discardProposalMeta[id][item.value]={
+            mode:'recent23',rank:item.origin,score:1-item.risk,reasons:item.reasons
+          };
+        }
+      }
+      renderDiscardCards();
+      return;
     }
 
     if(discardMode==='calibrated'){
@@ -2059,7 +2312,9 @@ El valor del último sorteo de cada columna se usa como candidato especial cuand
       const c=document.createElement('div');c.className='dcard';
       const last=historyAnalysis.latest[id], rr=historyAnalysis.repeatRate[id]*100;
       const repeatsPrevious=historyAnalysis.prev && historyAnalysis.latest[id]===historyAnalysis.prev[id];
-      c.innerHTML=`<div class="dhead">${pretty(id)}</div><div class="dinfo">último ${last}${repeatsPrevious?'<span class="repeatbadge" title="Repite respecto al penúltimo sorteo">R</span>':''} · rep. hist. ${rr.toFixed(1)}%</div><div class="dvals"></div><div class="rec"></div>`;
+      const recentInfo=discardMode==='recent23'&&recent23Forecast?.byId?.[id]
+        ? `<br>U1 ${recent23Forecast.byId[id].recent[0]} · U2 ${recent23Forecast.byId[id].recent[1]} · U3 ${recent23Forecast.byId[id].recent[2]}`:'';
+      c.innerHTML=`<div class="dhead">${pretty(id)}</div><div class="dinfo">último ${last}${repeatsPrevious?'<span class="repeatbadge" title="Repite respecto al penúltimo sorteo">R</span>':''} · rep. hist. ${rr.toFixed(1)}%${recentInfo}</div><div class="dvals"></div><div class="rec"></div>`;
       const vb=c.querySelector('.dvals');
       for(let v=1;v<=9;v++){
         const b=document.createElement('button');b.className='dval'+(discardState[id].has(v)?' discard':'')+(v===last?' last':'');b.textContent=v;
@@ -2076,6 +2331,13 @@ El valor del último sorteo de cada columna se usa como candidato especial cuand
             if(!discardProposalMeta[id])discardProposalMeta[id]={};
             if(discardState[id].has(v)&&!discardProposalMeta[id][v]){
               discardProposalMeta[id][v]={mode:'calibrated',rank:'manual',score:0,reasons:[{k:'calibrated',t:'manual'}]};
+            }
+            resetCalibratedTestResult();
+          }
+          if(discardMode==='recent23'){
+            if(!discardProposalMeta[id])discardProposalMeta[id]={};
+            if(discardState[id].has(v)&&!discardProposalMeta[id][v]){
+              discardProposalMeta[id][v]={mode:'recent23',rank:'manual',score:0,reasons:[{k:'recent23',t:'manual'}]};
             }
             resetCalibratedTestResult();
           }
@@ -2136,8 +2398,9 @@ El valor del último sorteo de cada columna se usa como candidato especial cuand
 
   function evaluateCalibratedCombination(){
     const box=document.getElementById('calibratedTestResult');
-    if(!historyAnalysis||!calibratedForecast){
-      box.textContent='Analiza primero un histórico y activa Calibrado 56.';return;
+    const forecastReady=discardMode==='recent23'?recent23Forecast:discardMode==='calibrated'?calibratedForecast:null;
+    if(!historyAnalysis||!forecastReady){
+      box.textContent=`Analiza primero un histórico y activa ${discardMode==='recent23'?'Recientes 2–3':'Calibrado 56'}.`;return;
     }
     const read=calibratedTestNumbers();
     if(!read.numbers){
@@ -2209,6 +2472,7 @@ El valor del último sorteo de cada columna se usa como candidato especial cuand
     document.querySelectorAll('.forecastbar .mode[data-mode]').forEach(x=>x.classList.remove('active'));b.classList.add('active');discardMode=b.dataset.mode;struct56Validation=null;
     document.getElementById('applyAll63').textContent=
       discardMode==='struct56'?'Enviar Estructural 56 compatible':
+      discardMode==='recent23'?'Enviar Recientes 2–3':
       discardMode==='calibrated'?'Enviar Calibrado 56':'Enviar pronóstico completo · 63 columnas';
     const smb=document.getElementById('struct56MethodBox');
     if(smb)smb.style.display=discardMode==='struct56'?'flex':'none';
@@ -2226,6 +2490,7 @@ El valor del último sorteo de cada columna se usa como candidato especial cuand
       broad:'Amplio: hasta 3 descartes por columna y acepta señales más débiles o combinadas. Es el modo más exploratorio.',
       temporal:'Temporal: estudia U1, U2, U3 y U4 en las 63 columnas. Propone como máximo un descarte por columna y exige una fiabilidad histórica suficiente y ventaja frente a la base empírica.',
       adaptive:'Adaptativo: trabaja sobre las 63 columnas y combina los criterios actuales con la mejor referencia temporal U1–U4 de cada columna. Puede proponer hasta 2 descartes por columna.',
+      recent23:'Recientes 2–3: actúa sobre las 56 columnas de Parejas, Tríos, Cuartetos y Quintetos. Parte de los valores U1, U2 y U3 de cada columna, mide retrospectivamente su riesgo de aparecer en el siguiente sorteo y sustituye los que no son descartes suficientemente seguros. El resultado contiene 2 o 3 valores distintos por columna.',
       calibrated:'Calibrado 56: reproduce cada sorteo usando exclusivamente la información anterior. Combina frecuencia histórica, ventana reciente y transiciones U1/U2 con suavizado. Solo aplica descartes si también supera la validación global del conjunto; Posiciones + VDC no se modifican. Puedes comprobar después una combinación real o generar una aleatoria sin alterar el histórico.',
       struct56:'Estructural 56: actúa sobre las 56 columnas de Parejas, Tríos, Cuartetos y Quintetos. Por defecto usa Reparación secuencial. Además, cuando acumulas al menos 3 reparaciones retrospectivas con ganadoras conocidas, esa memoria se usa como referencia suave: penaliza ligeramente los valores que históricamente tuvieron que recuperarse para conservar la ganadora.'
     }[discardMode];
@@ -2277,7 +2542,7 @@ El valor del último sorteo de cada columna se usa como candidato especial cuand
         return alert('El Estructural 56 no es viable con la configuración actual. Revisa el aviso de compatibilidad.');
       }
       applyDiscardsToPTCQ(false,new Set(['pairs','trios','quartets','quintets']));
-    }else if(discardMode==='calibrated'){
+    }else if(discardMode==='calibrated'||discardMode==='recent23'){
       applyDiscardsToPTCQ(false,new Set(['pairs','trios','quartets','quintets']));
     }else{
       applyDiscardsToPTCQ(false,new Set(['positions','pairs','trios','quartets','quintets']));
@@ -2290,6 +2555,32 @@ El valor del último sorteo de cada columna se usa como candidato especial cuand
     for(const [fam,ids] of Object.entries(familyIds)){const ar=A.famCounts[fam],cur=ids.filter(id=>A.latest[id]===A.prev[id]).length;lines.push(`${familyNames[fam]}\\t${ids.length}\\t${mean(ar).toFixed(4)}\\t${median(ar)}\\t${quantile(ar,.25)}\\t${quantile(ar,.75)}\\t${cur}`)}
     lines.push('','Columna\\tÚltimo valor\\tTasa repetición inmediata\\tTasa tercera repetición\\tDescartes propuestos');
     all.forEach(id=>lines.push(`${id}\\t${A.latest[id]}\\t${(A.repeatRate[id]*100).toFixed(3)}%\\t${(A.tripleRate[id]*100).toFixed(3)}%\\t${[...discardState[id]].sort((a,b)=>a-b).join(' ')}`));
+    if(recent23Forecast){
+      const F=recent23Forecast,B=recent23Backtest;
+      lines.push('','RECIENTES 2–3 · U1/U2/U3 POR COLUMNA',
+        `Columnas con 2 descartes\\t${F.two}`,
+        `Columnas con 3 descartes\\t${F.three}`,
+        `Descartes totales\\t${F.total}`,
+        `Sustituciones o complementos\\t${F.replacements}`,
+        '',
+        'Columna\\tU1\\tU2\\tU3\\tPatrón\\tDescartes finales\\tSustituciones\\tRiesgo estimado');
+      for(const id of [...groups.pairs,...groups.trios,...groups.quartets,...groups.quintets]){
+        const r=F.byId[id];
+        lines.push(`${id}\\t${r.recent[0]}\\t${r.recent[1]}\\t${r.recent[2]}\\t${r.pattern}\\t${r.selected.map(x=>x.value).join(' ')}\\t${r.replacements}\\t${r.expectedRisk.toFixed(6)}`);
+      }
+      if(B){
+        lines.push('','RECIENTES 2–3 · BACKTEST MÓVIL SIN MIRAR EL FUTURO',
+          `Sorteos comprobados\\t${B.draws}`,
+          `Descartes aplicados\\t${B.selections}`,
+          `Fallos\\t${B.errors}\\t${B.selections?(B.rate*100).toFixed(4):'0.0000'}%`,
+          `Fallos esperados al azar\\t${B.randomExpected.toFixed(4)}`,
+          `Primera mitad\\t${(B.firstRate*100).toFixed(4)}%`,
+          `Segunda mitad\\t${(B.secondRate*100).toFixed(4)}%`,
+          `Media descartes por sorteo\\t${B.averageSelected.toFixed(4)}`,
+          `Media fallos por sorteo\\t${B.averageErrors.toFixed(4)}`,
+          `Máximo de fallos\\t${B.maxErrors}`);
+      }
+    }
     if(calibratedForecast){
       const C=calibratedForecast;
       lines.push('','CALIBRADO 56 · VALIDACIÓN MÓVIL',
