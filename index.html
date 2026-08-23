@@ -687,9 +687,10 @@
   const vdcFromKey=key=>{let sum=0;for(let p=0;p<6;p++){sum+=(key%9)+1;key=Math.floor(key/9)}return sum%9||9};
   const bucketKey=(vdc,eq)=>vdc+'_'+eq;
   const aggregateKey=eq=>'TODAS_VDC_'+eq;
+  const totalKey='RECOPILADO_TOTAL';
 
   function plannedFileCounts(keys,eqs,mode,equivalences){
-    const counts={};
+    const counts={[totalKey]:0};
     for(const eq of equivalences){
       counts[aggregateKey(eq)]=0;
       for(let vdc=1;vdc<=9;vdc++)counts[bucketKey(vdc,eq)]=0;
@@ -699,6 +700,7 @@
       const amount=mode==='natural'?eq:1;
       counts[bucketKey(vdcFromKey(keys[i]),eq)]+=amount;
       counts[aggregateKey(eq)]+=amount;
+      counts[totalKey]+=amount;
     }
     return counts;
   }
@@ -722,6 +724,11 @@
       const file=await folder.getFileHandle(prefix+'_'+count+'_combinaciones.txt',{create:true});
       writers[aggregateKey(eq)]=await file.createWritable({keepExistingData:false});
     }
+    const totalFolder=await root.getDirectoryHandle(totalKey,{create:true});
+    const totalPrefix=mode==='natural'?'Naturales':'Digitales';
+    const totalCount=plannedCounts[totalKey]||0;
+    const totalFile=await totalFolder.getFileHandle(totalPrefix+'_TODAS_'+totalCount+'_combinaciones.txt',{create:true});
+    writers[totalKey]=await totalFile.createWritable({keepExistingData:false});
     return writers;
   }
 
@@ -749,7 +756,7 @@
           const eq=eqs[i];if(!equivalences.includes(eq))continue;
           const digits=digitsFromKey(keys[i]),sum=digits.reduce((a,b)=>a+b,0),vdc=sum%9||9,key=bucketKey(vdc,eq);
           const line=digits.join(' ')+' | suma digital '+sum+' | VDC '+vdc+' | equivalencia '+eq+'\\n';
-          await append(key,line);await append(aggregateKey(eq),line);exported++;
+          await append(key,line);await append(aggregateKey(eq),line);await append(totalKey,line);exported++;
           if((processed%50000)===0)postMessage({kind:'progress',mode,processed,total:keys.length,exported});
         }
       }else{
@@ -774,7 +781,7 @@
           let ok=true;for(const def of defs)if(!pass(d,def)){ok=false;break}if(!ok)continue;
           const sum=d.reduce((x,y)=>x+y,0),vdc=sum%9||9,key=bucketKey(vdc,eq);
           const line=String(a).padStart(2,'0')+' '+String(b).padStart(2,'0')+' '+String(c).padStart(2,'0')+' '+String(d4).padStart(2,'0')+' '+String(e5).padStart(2,'0')+' '+String(f).padStart(2,'0')+'\\n';
-          await append(key,line);await append(aggregateKey(eq),line);exported++;
+          await append(key,line);await append(aggregateKey(eq),line);await append(totalKey,line);exported++;
           if((processed%900000)===0)postMessage({kind:'progress',mode,processed,total:TOTAL,exported});
         }
       }
@@ -806,7 +813,7 @@
     const progress=document.getElementById('progress'),progressText=document.getElementById('progressText');
     const naturalBtn=document.getElementById('exportResults'),digitalBtn=document.getElementById('exportDigital');
     progress.classList.add('show');naturalBtn.disabled=true;digitalBtn.disabled=true;
-    progressText.textContent=`Preparando exportación ${kind.toLowerCase()} por VDC 1–9 y recopilados globales de equivalencia ${eqFilter==='all'?'1/7/28/84/210':eqFilter}…`;
+    progressText.textContent=`Preparando exportación ${kind.toLowerCase()} por VDC 1–9, equivalencias y recopilado total en un único TXT…`;
 
     const wb=new Blob([classifiedExportWorkerSource()],{type:'application/javascript'}),url=URL.createObjectURL(wb);
     exportWorker=new Worker(url);URL.revokeObjectURL(url);
@@ -822,7 +829,7 @@
       if(m.kind==='done'){
         finish();
         const globalFolders=eqFilter==='all'?5:1;
-        document.getElementById('resultNote').textContent=`Exportación terminada: ${fmt(m.exported)} ${kind.toLowerCase()} guardadas en «${m.rootName}», con 9 carpetas VDC y ${globalFolders} recopilado${globalFolders===1?'':'s'} global${globalFolders===1?'':'es'} por equivalencia.`;
+        document.getElementById('resultNote').textContent=`Exportación terminada: ${fmt(m.exported)} ${kind.toLowerCase()} guardadas en «${m.rootName}», con 9 carpetas VDC, ${globalFolders} recopilado${globalFolders===1?'':'s'} global${globalFolders===1?'':'es'} por equivalencia y la carpeta RECOPILADO_TOTAL con un único TXT.`;
       }
     };
     exportWorker.onerror=e=>{finish();alert('Error durante la exportación clasificada: '+e.message)};
