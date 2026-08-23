@@ -498,7 +498,40 @@
   document.getElementById('resetSequence').onclick=()=>{state.sequence=[...all];renderAll()};
   document.getElementById('enableAll').onclick=()=>{all.forEach(id=>state.enabled[id]=true);renderAll()};
 
-  document.getElementById('saveConfig').onclick=()=>download('PTCQ_configuracion.json',JSON.stringify({version:3,values:state.values,sequence:state.sequence,enabled:state.enabled,retroRepairMemory},null,2),'application/json');
+  // ===== GUARDADO DE CONFIGURACIÓN CON DESTINO ELEGIBLE =====
+  function configurationPayload(){
+    return JSON.stringify({version:3,values:state.values,sequence:state.sequence,enabled:state.enabled,retroRepairMemory},null,2);
+  }
+  async function saveConfiguration(){
+    const fileName='PTCQ_configuracion.json',text=configurationPayload(),type='application/json';
+    try{
+      if(window.showSaveFilePicker){
+        const handle=await window.showSaveFilePicker({
+          id:'ptcq-configuration',suggestedName:fileName,
+          types:[{description:'Configuración PTCQ',accept:{'application/json':['.json']}}]
+        });
+        const writer=await handle.createWritable({keepExistingData:false});
+        await writer.write(new Blob([text],{type}));
+        await writer.close();
+        return;
+      }
+      if(window.showDirectoryPicker){
+        const directory=await window.showDirectoryPicker({id:'ptcq-configuration',mode:'readwrite'});
+        const handle=await directory.getFileHandle(fileName,{create:true});
+        const writer=await handle.createWritable({keepExistingData:false});
+        await writer.write(new Blob([text],{type}));
+        await writer.close();
+        return;
+      }
+      download(fileName,text,type);
+      alert('Este navegador no permite elegir la carpeta desde la aplicación. Se ha usado la descarga convencional; en Chrome o Edge puedes activar «Preguntar dónde guardar cada archivo».');
+    }catch(err){
+      if(err?.name==='AbortError')return;
+      alert('No se pudo guardar la configuración: '+(err?.message||String(err)));
+    }
+  }
+  // ===== FIN GUARDADO DE CONFIGURACIÓN CON DESTINO ELEGIBLE =====
+  document.getElementById('saveConfig').onclick=saveConfiguration;
   document.getElementById('loadConfigBtn').onclick=()=>document.getElementById('loadConfig').click();document.getElementById('loadConfig').onchange=async e=>{const f=e.target.files[0];if(!f)return;try{const obj=JSON.parse(await f.text());all.forEach(id=>state.values[id]=Array.isArray(obj.values?.[id])?obj.values[id].filter(v=>v>=1&&v<=9):[]);state.sequence=Array.isArray(obj.sequence)?obj.sequence.filter(id=>all.includes(id)):[...all];all.filter(id=>!state.sequence.includes(id)).forEach(id=>state.sequence.push(id));all.forEach(id=>state.enabled[id]=obj.enabled?.[id]!==false);
       retroRepairMemory=(obj.retroRepairMemory&&typeof obj.retroRepairMemory==='object')
         ? {samples:Number(obj.retroRepairMemory.samples)||0,hits:obj.retroRepairMemory.hits||{}}
